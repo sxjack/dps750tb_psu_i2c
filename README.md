@@ -9,7 +9,7 @@ Details of how to get the power supply running can be found on Peter Lorenzen's 
 The I2C pullups in the DPS-750TB are very weak. I had to add a couple of 10k's to get an ESP32 to speak to it. 
 If you use a 5V Arduino, e.g. a Nano, you will need a level shifter between the Arduino and the DPS-750TB.
 
-![Nano/16x2 getting data from a DPS-750TB]DPS750_4.jpg
+![Nano/16x2 getting data from a DPS-750TB](DPS750_4.jpg)
 
 * References
   * http://peter.lorenzen.us/linux/server-power-supply-dps-750tb
