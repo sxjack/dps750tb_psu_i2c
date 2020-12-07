@@ -20,6 +20,8 @@ If you use a 5V Arduino, e.g. a Nano, you will need a level shifter between the 
   * https://github.com/fmalpartida/New-LiquidCrystal
 
 * Hardware
+  * https://www.banggood.com/Geekcreit-ATmega328P-Nano-V3-Controller-Board-Improved-Version-Module-Development-Board-p-940937.html
+  * https://www.banggood.com/Geekcreit-IIC-or-I2C-1602-Blue-Backlight-LCD-Display-Screen-Module-Geekcreit-for-Arduino-products-that-work-with-official-Arduino-boards-p-950726.html
   * https://uk.banggood.com/Geekcreit-ESP32-WiFi+bluetooth-Development-Board-Ultra-Low-Power-Consumption-Dual-Cores-Pins-Unsoldered-p-1214159.html
   * https://www.banggood.com/1_3-Inch-4Pin-White-OLED-LCD-Display-12864-IIC-I2C-Interface-Module-p-1067874.html
 
