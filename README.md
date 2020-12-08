@@ -1,4 +1,4 @@
-# 
+# dps750tb_psu_i2c
 
 Arduino program for extracting data from a DPS-750TB power supply and driving a display and/or web page. 
 
