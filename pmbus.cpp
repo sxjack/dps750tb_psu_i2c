@@ -315,6 +315,18 @@ void PMBus::clear_faults() {
   I2C->write(0x03);
   I2C->endTransmission(true);
 
+  status_u8           =
+  status_word         = 0;
+ 
+  status_vout         =
+  status_iout         =
+  status_input        =
+  status_temperature  =
+  status_cml          =
+  status_other        =
+  status_mfr_specific =
+  status_fans         = 0;
+
   return;
 }
 
