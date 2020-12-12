@@ -7,17 +7,38 @@
  * MIT Licence.
  *
  * Use at your own risk.
+ * 
  *
  * Notes
+ *
+ * MAKE SURE THAT THE VOLTAGES (5V, 3.3V) OF THE VARIOUS INTERFACES ARE ALIGNED.
  *
  * Developed with an ESP32 (ARDUINO_ARCH_ESP32), a Nano (ARDUINO_AVR_NANO)
  * and a Dell DSP-750TB. Should work with an STM32F1 or a ESP8266.
  * 
- * Use an ESP if you want a web interface, the STM32 or Nano if you just want a display.
- * 
- * Notes
+ * Use an ESP if you want a web interface, an STM32F1 or Nano if you just want a display.
  *
- * STM32duino: "Generic STM32F1 series", "BluePill F103CB", "Enabled (no generic 'Serial')".
+ * Display Options (LCD_DISPLAY)
+ * 
+ *  1       16x2 with a 4-bit interface
+ *  6       16x2 with I2C backpack at 0x27
+ *  7       16x2 with I2C backpack at 0x3f
+ * 11       SH1106 128X64 I2C
+ * 12       SSD1306 128X64 I2C
+ * 16       SSD1306 64X48 I2C
+ * 
+ * WS2812   Displays the value of the status byte on a chain of eight WS2812 LEDs.
+ * 
+ * Web commands
+ * 
+ * on       Use the 'PSON_do' output to turn the PSU on.
+ * off
+ * model    Reads the PSU model name.
+ * clear    Clears the faults.
+ *
+ * STM32duino
+ * 
+ * "Generic STM32F1 series", "BluePill F103CB", "Enabled (no generic 'Serial')".
  * If you don't set the Serial support correctly, you get a strange linker error.
  * 
  *
@@ -67,8 +88,8 @@ static const int blink_do = PC13, PSON_do = PB14, I2C_enable_do = PB15;
 
 #if defined(ARDUINO_ARCH_ESP32)
 
-#define LCD_DISPLAY       6 // 11
-#define WS2812           27
+#define LCD_DISPLAY       7 // 11
+// #define WS2812           25
 
 #include <WiFi.h>
 #include <HTTPClient.h>
@@ -146,6 +167,13 @@ LiquidCrystal lcd(9,8,7,6,5,4);
 static const uint8_t      display_address = 0x27;
 static LiquidCrystal_I2C  lcd(display_address,2,1,0,4,5,6,7);
 
+#elif LCD_DISPLAY == 7
+
+#include <LiquidCrystal_I2C.h>
+
+static const uint8_t      display_address = 0x3f;
+static LiquidCrystal_I2C  lcd(display_address,2,1,0,4,5,6,7);
+
 #endif
 
 #elif (LCD_DISPLAY > 10) && (LCD_DISPLAY < 20)
@@ -203,7 +231,7 @@ void setup() {
 
   Wire.begin();
   // Using Wire1 on 12 & 14 crashes the program.
-  Wire1.begin(18,19,100000);
+  Wire1.begin(27,26,100000);
 
 #elif defined(ARDUINO_ARCH_ESP8266)
 
@@ -648,12 +676,14 @@ void webserver() {
   static const char *http_header[]     = {"HTTP/1.1 200 OK", "Content-Type: text/html",
                                           "Connection: close", NULL},
                     *html_header[]     = {"<html>", "<head>", 
-                                          "<meta http-equiv=\"Refresh\" content=\"5\"/>",
+                                          "<meta http-equiv=\"Refresh\" content=\"5; URL=/\"/>",
                                           "</head>", "<body>", NULL},
                     *html_footer[]     = {"</body", "</html>", NULL},
                     *status_word_s[16] = {"OTHER", "CML", "TEMPERATURE", "VIN_UV", "IOUT_OC", "VOUT_OV", "OFF", "BUSY",
                                           "UNKNOWN", "OTHER", "FANS", "POWER_GOOD#", "MFR", "INPUT", "IOUT", "VOUT",},
                     *crlf = "\r\n", *on_s = "ON", *off_s = "OFF";
+
+  //
 
   if (!(client = server.available())) {
 
@@ -670,7 +700,17 @@ void webserver() {
   } else if ((request_s[5] == 'o')&&(request_s[6] == 'f')&&(request_s[7] == 'f')) {
 
     psu.standby();
+    
+  } else if (strncmp(&request_s[5],"clear",5) == 0) {
+
+    psu.clear_faults();
+    
+  } else if (strncmp(&request_s[5],"model",5) == 0) {
+
+    psu.check_model();
   }
+
+  //
 
   for (i = 0; http_header[i]; ++i) {
 
