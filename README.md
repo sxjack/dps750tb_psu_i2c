@@ -10,7 +10,7 @@ The I2C pullups in the DPS-750TB are very weak. I had to add a couple of 10k's t
 If you use a 5V Arduino, e.g. a Nano, you will need a level converter between the Arduino and the DPS-750TB 
 (use the outer pins on the converter linked to below).
 
-![ESP32 getting data from a DPS-750TB and driving a 16x2](DPS750_4.jpg)
+![ESP32 getting data from a DPS-750TB and driving a 16x2](DPS750_5.jpg)
 
 * References
   * http://peter.lorenzen.us/linux/server-power-supply-dps-750tb
