@@ -8,13 +8,26 @@
  *
  * Use at your own risk.
  * 
+ * 22/12    Raspberry Pi Pico W support.
+ * 
+ * 21/01/15 The ESP32 sometimes loses the WiFi connection (see issues below).
+ *          Diagnostics added. Code added to loop() to check for a connection.
+ * 
  *
+ * Issues
+ * 
+ * Sometimes the ESP32 seems to lose the WiFi connection.
+ * I am not sure if this is an issue with the ESP32, the program or is down to walls 
+ * and ambient conditions.
+ * 
+ * Sometimes the Pico W fails to get an IP address.
+ * 
  * Notes
  *
  * MAKE SURE THAT THE VOLTAGES (5V, 3.3V) OF THE VARIOUS INTERFACES ARE ALIGNED.
  *
  * Developed with an ESP32 (ARDUINO_ARCH_ESP32), a Nano (ARDUINO_AVR_NANO)
- * and a Dell DSP-750TB. Should work with an STM32F1 or a ESP8266.
+ * and a Dell DSP-750TB. Should work with an STM32F1, an ESP8266 or Pico W.
  * 
  * Use an ESP if you want a web interface, an STM32F1 or Nano if you just want a display.
  *
@@ -41,7 +54,8 @@
  * "Generic STM32F1 series", "BluePill F103CB", "Enabled (no generic 'Serial')".
  * If you don't set the Serial support correctly, you get a strange linker error.
  * 
- *
+ * Pico W
+ * 
  *
  *
  */
@@ -50,9 +64,31 @@
 
 #define DIAGNOSTICS  1
 #define WEBSERVER    1
+#define JSON_STATUS  0
+#define UDP_DIAG     1
+#define OTA_ENABLE   1
+#define SET_CLOCK    1
 
 /*
  *
+ */
+
+#if not defined(ARDUINO_ARCH_ESP32)
+#if OTA_ENABLE
+#undef OTA_ENABLE
+#define OTA_ENABLE 0
+#endif
+#endif
+
+#if defined(ARDUINO_ARCH_ESP8266)
+#if SET_CLOCK
+#undef SET_CLOCK
+#define SET_CLOCK 0
+#endif
+#endif
+
+/*
+ * 
  */
 
 #include <Arduino.h>
@@ -80,20 +116,30 @@ static const int blink_do = PC13, PSON_do = PB14, I2C_enable_do = PB15;
 
 #elif defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)       // ESP
 
+#include <time.h>
+
+#define ENABLE_WIFI       1
 #define OUTPUT_DIRECTION  0
 #define DebugSerial    Serial
 
-#define WIFI_SSID     "ssid" 
-#define WIFI_PASSWORD "secret"
-
 #if defined(ARDUINO_ARCH_ESP32)
 
-#define LCD_DISPLAY       7 // 11
+#define LCD_DISPLAY       0 // 7 or 11
 // #define WS2812           25
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <time.h>
+
+#if OTA_ENABLE
+#include <ArduinoOTA.h>
+#endif
+
+#if DIAGNOSTICS
+extern "C" {
+uint8_t temprature_sens_read(void); // This function is supposed to return degrees F, but is pretty useless.
+#include <esp_wifi.h>
+}
+#endif
 
 static const int blink_do =  2, PSON_do =  5, I2C_enable_do = 15;
 
@@ -108,19 +154,20 @@ static const int blink_do = D5, PSON_do = D6, I2C_enable_do = D7;
 
 #endif
 
-#include <WiFiUdp.h>
+#elif defined(ARDUINO_RASPBERRY_PI_PICO_W)                               // Pico W
 
-int  syslog(IPAddress,char *);
-int  connectWiFi(void);
-void get_addresses(void);
-void webserver(void);
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <time.h>
 
-static char        gateway_s[18], my_ip_s[18];
-static IPAddress   my_ip, gateway_ip;
-static WiFiUDP     udp;
-#if WEBSERVER
-static WiFiServer  server(80);
-#endif
+#include <pico/cyw43_arch.h>
+
+#define ENABLE_WIFI       1
+#define LCD_DISPLAY       0 // 11
+#define OUTPUT_DIRECTION  0
+#define DebugSerial    Serial1
+
+static const int blink_do = 20, PSON_do = 21, I2C_enable_do = 22;
 
 #elif defined(ARDUINO_AVR_NANO)                                          // AVR Nano
 
@@ -136,6 +183,38 @@ static const int blink_do = 13, PSON_do = 12, I2C_enable_do = 11;
 #error "No configuration for this processor."
 
 #endif // Processor specific configuration.
+
+#if defined(ENABLE_WIFI)
+
+#include <WiFiUdp.h>
+
+int  syslog(IPAddress,char *);
+int  connectWiFi(void);
+void get_addresses(void);
+void webserver(void);
+
+static char        gateway_s[18], my_ip_s[18];
+static IPAddress   my_ip, gateway_ip;
+static WiFiUDP     udp;
+#if WEBSERVER
+static WiFiServer  server(80);
+#endif
+
+#define WIFI_SSID     "ssid" 
+#define WIFI_PASSWORD "secret"
+// #define WIFI_CSS      "http://192.168.9.8/models/models.css"
+
+#if defined(ARDUINO_ARCH_ESP32)
+static int      wifi_reconnects = 0;
+static uint32_t last_wifi_reconnect = 0;
+#endif
+
+#if SET_CLOCK
+#include <simple_ntp.h>
+static simple_NTP ntp;
+#endif
+
+#endif
 
 /*
  *  Displays.
@@ -221,9 +300,11 @@ static PMBus           psu;
 
 void setup() {
 
-  int status, i;
+  int  status, i;
+  char text[128];
 
-  status = i = 0;
+  text[0] =
+  status  = i = 0;
 
   pinMode(blink_do,OUTPUT);
 
@@ -242,6 +323,11 @@ void setup() {
   Wire.begin();
   // Wire2.begin();
 
+#elif defined(ARDUINO_RASPBERRY_PI_PICO_W)
+
+  Wire.begin();   // SDA  4, SCL  5
+  Wire1.begin();  // SDA 26, SCL 27
+
 #else 
 
   Wire.begin();
@@ -257,20 +343,18 @@ void setup() {
   Wire.setClock(100000);
 
 #if DIAGNOSTICS
-
   DebugSerial.print("\r\n");
   DebugSerial.print((char *) title);
   DebugSerial.print("\r\n");
   DebugSerial.print((char *) build_date);
   DebugSerial.print("\r\n\n");
-
 #endif
 
   //
 
   delay(100);
 
-#if defined(ARDUINO_ARCH_ESP32)
+#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_RASPBERRY_PI_PICO_W)
   psu.init(PSON_do,I2C_enable_do,OUTPUT_DIRECTION,0x58,&DebugSerial,&Wire1);
 #else
   psu.init(PSON_do,I2C_enable_do,OUTPUT_DIRECTION,0x58,&DebugSerial);
@@ -340,26 +424,67 @@ void setup() {
 
   //
 
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+#if defined(ENABLE_WIFI)
 
   status = connectWiFi();
-
   get_addresses();
 
-  syslog(gateway_ip,(char *) "setup() complete");
+#if DIAGNOSTICS
+  sprintf(text,"IP address: %d.%d.%d.%d\r\n",my_ip[0],my_ip[1],my_ip[2],my_ip[3]);
+  DebugSerial.print(text);
+  sprintf(text,"server:     %d.%d.%d.%d\r\n",
+          gateway_ip[0],gateway_ip[1],gateway_ip[2],gateway_ip[3]);
+  DebugSerial.print(text);
+#endif
 
 #if WEBSERVER
 
   server.begin();
 
+#if DIAGNOSTICS
+  DebugSerial.print("webserver started\r\n");
+#endif
 #endif
 
+#if SET_CLOCK
+
+  ntp.begin(gateway_ip);
+  ntp.sync();
+
 #endif
+
+#if OTA_ENABLE
+
+  ArduinoOTA.setHostname(title);
+
+  ArduinoOTA
+    .onStart([]() {
+      ;
+    })
+    .onEnd([]() {
+      ;
+    })
+    .onProgress([](unsigned int progress, unsigned int total) {
+      ;
+    })
+    .onError([](ota_error_t error) {
+      ;
+    });
+
+  ArduinoOTA.begin();  
+
+#endif
+
+#endif // WiFi
 
   psu.on();
 
+#if defined(ENABLE_WIFI)
+  syslog(gateway_ip,(char *) "setup() complete");
+#endif
+
 #if DIAGNOSTICS
-  DebugSerial.print("setup() complete\r\n");
+  DebugSerial.print("\r\nsetup() complete\r\n\n");
 #endif
 
   return;
@@ -382,7 +507,7 @@ void loop() {
 #elif LCD_DISPLAY > 10
   static int       display_phase = 0;
 #endif
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+#if defined(ENABLE_WIFI)
 static int         last_hour = -1;
 static time_t      ticks;
 struct tm         *local_tm;
@@ -398,7 +523,9 @@ struct tm         *local_tm;
   if (psu.scan()) {
 
     digitalWrite(blink_do,blink ^= 1);
-
+#if defined(ARDUINO_RASPBERRY_PI_PICO_W)
+    cyw43_arch_gpio_put(0,blink);
+#endif
     last_scan = run_secs;
 
     dtostrf(psu.V_out,5,2,V_out_s);
@@ -407,7 +534,6 @@ struct tm         *local_tm;
 #if defined(WS2812)
 
     for (i = 0; i < 8; ++i) {
-
        status_ws2812.setPixelColor(i,((psu.status_u8 >> i) & 0x01) ? 0xff0000: 0x003f00); 
     }
 
@@ -415,7 +541,7 @@ struct tm         *local_tm;
 
 #endif
 
-#if defined(DebugSerial)
+#if JSON_STATUS
 
     sprintf(text,"{ \"run time\": %lu, \"Vout\": %s, \"Iout\": %s }\r\n",
             run_secs,V_out_s,I_out_s);
@@ -423,10 +549,23 @@ struct tm         *local_tm;
 
 #endif
 
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+#if defined(ENABLE_WIFI)
 
     time(&ticks);
     local_tm = localtime(&ticks);
+
+#if defined(ARDUINO_ARCH_ESP32)
+    if ((WiFi.status() != WL_CONNECTED)&&
+        ((run_secs - last_wifi_reconnect) > 900)) {
+
+      WiFi.reconnect();
+
+      ++wifi_reconnects;
+      last_wifi_reconnect = run_secs;
+
+      syslog(gateway_ip,(char *) "WiFi reconnected");      
+    }
+#endif
 
     if (local_tm->tm_hour != last_hour) {
 
@@ -434,10 +573,20 @@ struct tm         *local_tm;
 
       sprintf(text,"%sV, %sA, %dC",V_out_s,I_out_s,(int) psu.T[0]);
       syslog(gateway_ip,text);
+
+#if UDP_DIAG && defined(ARDUINO_ARCH_ESP32)
+      sprintf(text,"heap %06u, stack %08x",
+              ESP.getFreeHeap(),text);
+      syslog(gateway_ip,text);
+#endif
     }
 
 #endif
   }
+
+#if OTA_ENABLE
+    ArduinoOTA.handle();
+#endif
 
   yield();
 
@@ -460,13 +609,11 @@ struct tm         *local_tm;
       switch (lcd_counter / 80) { // 4 seconds on a page
 
       case 0:
-
         sprintf(lcd_line_1,"%2dC %2dC %4drpm ",(int) psu.T[0],(int) psu.T[1],(int) psu.fan[0]);
 
         break;
 
       case 1:
-
         for (i = 0; i < 16; ++i) {
 
           lcd_line_1[15 - i] = ((psu.status_word >> i) & 0x01) ? '1': '0';
@@ -487,7 +634,6 @@ struct tm         *local_tm;
     switch (display_phase) {
 
     case 0:
-
       break;
 
     case 1:
@@ -500,14 +646,12 @@ struct tm         *local_tm;
       u8x8.drawString(0,1,text);
       break;
 
-    case 2:
-   
+    case 2: 
       sprintf(text,"   %3dV  %4dW  ",(int) psu.V_in,(int) psu.W_out);
       u8x8.drawString(0,display_phase,text);
       break;
 
     case 3:
-   
       sprintf(text," %sV %sA  ",V_out_s,I_out_s);
       u8x8.drawString(0,display_phase,text);
       break;
@@ -515,13 +659,11 @@ struct tm         *local_tm;
       break;
 
     case 4:
-   
       sprintf(text,"  %2dC  %4drpm  ",(int) psu.T[0],(int) psu.fan[0]);
       u8x8.drawString(0,display_phase,text);
       break;
 
     case 5:
-
       for (i = 0; i < 16; ++i) {
 
         text[15 - i] = ((psu.status_word >> i) & 0x01) ? '1': '0';
@@ -531,18 +673,16 @@ struct tm         *local_tm;
       u8x8.drawString(0,display_phase,text);
       break;
 
-    case 6:
-   
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+    case 6: 
+#if defined(ENABLE_WIFI)
       sprintf(text," %3ddB          ",WiFi.RSSI());
       u8x8.drawString(0,display_phase,text);
 #endif
       break;
 
     case 7: // This is just for detecting memory leaks.
-
 #if defined(ARDUINO_ARCH_ESP32)
-      sprintf(text,"%-6u  %08x",ESP.getFreeHeap(),text);
+      sprintf(text,"%06u  %08x",ESP.getFreeHeap(),text);
 #else
       sprintf(text,"%08x",text);
 #endif
@@ -562,29 +702,24 @@ struct tm         *local_tm;
     switch (display_phase) {
 
     case 0:
-   
       break;
 
     case 1:
-
       sprintf(text," %sV ",V_out_s);
       u8x8.drawString(0,display_phase,text);
       break;
 
     case 2:
-
       sprintf(text," %sA ",I_out_s);
       u8x8.drawString(0,display_phase,text);
       break;
 
     case 3:
- 
       sprintf(text,"%2dC %4d",(int) psu.T[0],(int) psu.fan[0]);
       u8x8.drawString(0,display_phase,text);
       break;
 
     case 4:
-
       for (i = 0; i < 8; ++i) {
 
         text[7 - i] = ((psu.status_word >> i) & 0x01) ? '1': '0';
@@ -595,8 +730,7 @@ struct tm         *local_tm;
       break;
 
     default:
-
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+#if defined(ENABLE_WIFI)
       sprintf(text,"%ddB",WiFi.RSSI());
       u8x8.drawString(1,5,text);
 #endif
@@ -613,10 +747,9 @@ struct tm         *local_tm;
 #endif  
 
     last_display_update = run_msecs;
-
   }
 
-#if (defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)) && WEBSERVER
+#if (defined(ENABLE_WIFI)) && WEBSERVER
 
   webserver();
 
@@ -629,7 +762,7 @@ struct tm         *local_tm;
  *  Processor specific functions.
  */
 
-#if defined(ARDUINO_ARCH_ESP32) || defined(ARDUINO_ARCH_ESP8266)
+#if defined(ENABLE_WIFI)
 
 int connectWiFi() {
 
@@ -643,6 +776,12 @@ int connectWiFi() {
 
     WiFi.begin(ssid,password);
 
+#if defined(ARDUINO_ARCH_ESP32)
+
+  // esp_wifi_set_max_tx_power(78);
+
+#endif
+
     for (i = 0; i < 20; ++i) {
 
       if ((status = WiFi.status()) == WL_CONNECTED) {
@@ -654,6 +793,18 @@ int connectWiFi() {
 
       delay(500);
     }
+
+#if DIAGNOSTICS && defined(ARDUINO_ARCH_ESP32)
+
+    char   text[64];
+    int8_t wifi_power;
+
+    esp_wifi_get_max_tx_power(&wifi_power);
+
+    sprintf(text,"wifi power %d dBm\r\n",(int) ((wifi_power + 2) / 4));
+    DebugSerial.print(text);
+
+#endif
   }
 
   return status;
@@ -667,31 +818,48 @@ int connectWiFi() {
 
 void webserver() {
 
-  int         i;
-  char        text[128], text2[16], text3[16], text4[16];
-  uint16_t    u16;
-  const char *request_s;
-  WiFiClient  client;
-  String      request;
+  int                i, efficiency = 0, efficiency2 = 0;
+  char               text[128], text2[16], text3[16], text4[16], text5[16];
+  float              W_in2, W_out2;
+  unsigned int       days;
+  unsigned long int  secs;
+  uint16_t           u16;
+  const char        *request_s;
+  String             request;
   static const char *http_header[]     = {"HTTP/1.1 200 OK", "Content-Type: text/html",
                                           "Connection: close", NULL},
-                    *html_header[]     = {"<html>", "<head>", 
-                                          "<meta http-equiv=\"Refresh\" content=\"5; URL=/\"/>",
-                                          "</head>", "<body>", NULL},
-                    *html_footer[]     = {"</body", "</html>", NULL},
+                    *html_header[]     = {"<html>\n", "<head>\n", 
+                                          "<meta http-equiv=\"Refresh\" content=\"5; URL=/\"/>\n",
+#if defined(WIFI_CSS)
+                                          "<link rel=\"stylesheet\" type=\"text/css\" href=\"",
+                                          WIFI_CSS,
+                                          "\"/>\n",
+#endif
+                                          "</head>\n", "<body>\n", NULL},
+                    *html_footer[]     = {"</body\n", "</html>\n", NULL},
                     *status_word_s[16] = {"OTHER", "CML", "TEMPERATURE", "VIN_UV", "IOUT_OC", "VOUT_OV", "OFF", "BUSY",
                                           "UNKNOWN", "OTHER", "FANS", "POWER_GOOD#", "MFR", "INPUT", "IOUT", "VOUT",},
                     *crlf = "\r\n", *on_s = "ON", *off_s = "OFF";
 
   //
 
-  if (!(client = server.available())) {
+#if defined(ARDUINO_ARCH_ESP8266)
+  WiFiClient client = server.available();
+#else
+  WiFiClient client = server.accept();
+#endif
 
+  if (!client) {
     return;
   }
 
   request   = client.readStringUntil('\r');
   request_s = request.c_str();
+
+#if 0 && DIAGNOSTICS
+  sprintf(text,"web request: %s\r\n",request_s);
+  DebugSerial.print(text);
+#endif
 
   if ((request_s[5] == 'o')&&(request_s[6] == 'n')) {
 
@@ -720,10 +888,24 @@ void webserver() {
 
   client.print(crlf);
 
+  //
+
+  if (psu.W_in > 0.001) {
+
+    efficiency = (int) (100.0 * psu.W_out / psu.W_in);
+  }
+
+  W_in2  = psu.V_in  * psu.I_in;
+  W_out2 = psu.V_out * psu.I_out;
+
+  if (W_in2 > 0.001) {
+
+    efficiency2 = (int) (100.0 * W_out2 / W_in2);
+  }  
+
   for (i = 0; html_header[i]; ++i) {
 
     client.print(html_header[i]);
-    client.print("\n");
   }
 
   sprintf(text,"<h3 align=\"center\">%s</h3>\n",
@@ -734,15 +916,25 @@ void webserver() {
 
   dtostrf(psu.I_in,5,2,text3);
   dtostrf(psu.W_in,6,1,text4);
-  sprintf(text,"<tr><td>Input (V/A/W)</td><td>%d</td><td>%s</td><td>%s</td></tr>\n",
-          (int) psu.V_in,text3,text4);
+  dtostrf(W_in2,6,1,text5);
+  sprintf(text,"<tr><td>Input (V/A/W/VA)</td><td>%d</td><td>%s</td><td>%d</td><td>%d</td></tr>\n",
+          (int) psu.V_in,text3,
+          (int) (psu.W_in + 0.5),(int) (W_in2 + 0.5));
+          // text4,text5);
   client.print(text);
 
   dtostrf(psu.V_out,5,2,text2);
   dtostrf(psu.I_out,5,2,text3);
   dtostrf(psu.W_out,6,1,text4);
-  sprintf(text,"<tr><td>Output (V/A/W)</td><td>%s</td><td>%s</td><td>%s</td></tr>\n",
-          text2,text3,text4);
+  dtostrf(W_out2,6,1,text5);
+  sprintf(text,"<tr><td>Output (V/A/W/VA)</td><td>%s</td><td>%s</td><td>%d</td><td>%d</td></tr>\n",
+          text2,text3,
+          (int) (psu.W_out + 0.5),(int) (W_out2 + 0.5));
+          // text4,text5);
+  client.print(text);
+
+  sprintf(text,"<tr><td>Efficiency (%%)</td><td colspan=\"2\"></td><td>%d</td><!--<td>%d</td>--></tr>\n",
+          efficiency,efficiency2);
   client.print(text);
 
   dtostrf(psu.T[0],4,1,text2);
@@ -755,7 +947,7 @@ void webserver() {
   sprintf(text,"<tr><td>Fan (rpm)</td><td>%d</td></tr>\n",(int) psu.fan[0]);
   client.print(text);
 
-  client.print("<tr><td align=\"center\" colspan=\"3\"><b>Status</b></td></tr>\n");
+  client.print("<tr><td align=\"center\" colspan=\"4\"><b>Status</b></td></tr>\n");
 
   for (i = 0, u16 = psu.status_word; i < 16; ++i) {
 
@@ -819,30 +1011,43 @@ void webserver() {
 
   client.print("</table>\n");
 
-  sprintf(text,"<!-- pmbus revision %02x -->\n",psu.pmbus_revision);
+  sprintf(text,"<!-- pmbus revision  %02x -->\n",psu.pmbus_revision);
   client.print(text);
-  sprintf(text,"<!-- vout mode      %02x -->\n",psu.vout_mode);
+  sprintf(text,"<!-- vout mode       %02x -->\n",psu.vout_mode);
   client.print(text);
-  sprintf(text,"<!-- vout command   %04x -->\n",psu.vout_command);
+  sprintf(text,"<!-- vout command    %04x -->\n",psu.vout_command);
   client.print(text);
-  sprintf(text,"<!-- model          \'%s\' -->\n",&psu.mfr_model[1]);
+  sprintf(text,"<!-- model           \'%s\' -->\n",&psu.mfr_model[1]);
   client.print(text);
-  sprintf(text,"<!-- revision       \'%s\' -->\n",&psu.mfr_revision[1]);
+  sprintf(text,"<!-- revision        \'%s\' -->\n",&psu.mfr_revision[1]);
   client.print(text);
 #if 0
-  sprintf(text,"<!-- total power on %lu s, %d days -->\n",
-          psu.total_power_on,(int) (psu.total_power_on / 86400l));
+  days = psu.total_power_on / 86400l;
+  sprintf(text,"<!-- total power on  %lu s, %u day%s -->\n",
+          psu.total_power_on,days,((days == 1) ? "": "s"));
   client.print(text);
 #endif
-  sprintf(text,"<!-- %s -->\n",build_date);
+#if defined(ARDUINO_ARCH_ESP32)
+  sprintf(text,"<!-- wifi reconnects %d -->\n",wifi_reconnects);
   client.print(text);
-  sprintf(text,"<!-- %s -->\n",request_s);
+  sprintf(text,"<!-- Free heap       %u bytes -->\n",ESP.getFreeHeap());
+  client.print(text);
+  sprintf(text,"<!-- Stack           0x%08x -->\n",&i);
+  client.print(text);  
+#endif
+  secs = (unsigned long int) (millis() / 1000L);
+  days = secs / 86400L;
+  sprintf(text,"<!-- Run time        %lu secs (%u day%s) -->\n",
+          secs,days,((days == 1) ? "": "s"));
+  client.print(text);
+  sprintf(text,"<!-- Build date      %s -->\n",build_date);
+  client.print(text);
+  sprintf(text,"<!-- \'%s\' -->\n",request_s);
   client.print(text);
 
   for (i = 0; html_footer[i]; ++i) {
 
     client.print(html_footer[i]);
-    client.print("\n");
   }
 
   return;
